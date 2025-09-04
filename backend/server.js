@@ -1,25 +1,30 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const mongoose = require('mongoose');
-const axios = require('axios');
-const { getEmbedding } = require('./embeddingService');
-const Workout = require('./models/Workout');
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const mongoose = require("mongoose");
+const axios = require("axios");
+const { getEmbedding } = require("./embeddingService");
+const { translateText } = require("./translationService"); // The import is the same
+const Workout = require("./models/Workout");
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const MONGO_URI = process.env.MONGO_URI;
 
-mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
+mongoose
+  .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log("MongoDB connected"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 
 // --- Route: Add a workout ---
-app.post('/workouts/add', async (req, res) => {
+app.post("/workouts/add", async (req, res) => {
   try {
     const { workoutName, description, category, intensity } = req.body;
-    const inputText = `${workoutName}. ${description}. Category: ${category}. Intensity: ${intensity}.`;
+    const translatedName = await translateText(workoutName);
+    const translatedDescription = await translateText(description);
+
+    const inputText = `${translatedName}. ${translatedDescription}. Category: ${category}. Intensity: ${intensity}.`;
     const embedding = await getEmbedding(inputText);
 
     const workout = new Workout({
@@ -31,28 +36,31 @@ app.post('/workouts/add', async (req, res) => {
     });
 
     await workout.save();
-    res.json({ message: '✅ Workout saved', workout });
+    res.json({ message: "✅ Workout saved", workout });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Failed to save workout.' });
+    res.status(500).json({ message: "Failed to save workout." });
   }
 });
 
 // --- Route: Check for duplicates ---
-app.post('/workouts/check', async (req, res) => {
+app.post("/workouts/check", async (req, res) => {
   try {
     const { workoutName, description, category, intensity } = req.body;
-    const inputText = `${workoutName}. ${description}. Category: ${category}. Intensity: ${intensity}.`;
+    const translatedName = await translateText(workoutName);
+    const translatedDescription = await translateText(description);
+
+    const inputText = `${translatedName}. ${translatedDescription}. Category: ${category}. Intensity: ${intensity}.`;
     const newEmbedding = await getEmbedding(inputText);
 
     const results = await Workout.aggregate([
       {
         $vectorSearch: {
           queryVector: newEmbedding,
-          path: 'embedding',
-          numCandidates: 10,
-          limit: 1,
-          index: 'workout_vector_index',
+          path: "embedding",
+          numCandidates: 100,
+          limit: 5,
+          index: "workout_vector_index",
         },
       },
       {
@@ -62,33 +70,31 @@ app.post('/workouts/check', async (req, res) => {
           description: 1,
           category: 1,
           intensity: 1,
-          _score: { $meta: 'vectorSearchScore' },
+          _score: { $meta: "vectorSearchScore" },
         },
       },
     ]);
 
     if (results.length > 0) {
-      const bestMatch = results[0];
-      const similarityScore = bestMatch._score;
-
-      if (similarityScore > 0.85) {
+      const filteredMatches = results.filter((match) => match._score > 0.85);
+      if (filteredMatches.length > 0) {
         return res.json({
           isDuplicate: true,
-          message: '⚠️ Possible duplicate workout found!',
-          matchedWith: {
-            id: bestMatch._id,
-            workoutName: bestMatch.workoutName,
-            description: bestMatch.description,
-            category: bestMatch.category,
-            similarity: similarityScore,
-          },
+          message: `⚠️ Found ${filteredMatches.length} possible duplicate(s)!`,
+          matchedWith: filteredMatches.map((match) => ({
+            id: match._id,
+            workoutName: match.workoutName,
+            description: match.description,
+            category: match.category,
+            similarity: match._score,
+          })),
         });
       }
     }
 
     res.json({
       isDuplicate: false,
-      message: '✅ No duplicate found.',
+      message: "✅ No duplicate found.",
     });
   } catch (err) {
     console.error(err);
@@ -97,27 +103,36 @@ app.post('/workouts/check', async (req, res) => {
 });
 
 // --- Route: Check for typos and grammar ---
-app.post('/workouts/lint', async (req, res) => {
-  const { description } = req.body;
-  if (!description) {
-    return res.status(400).json({ message: 'Description is required.' });
+app.post("/workouts/lint", async (req, res) => {
+  const { workoutName, description } = req.body;
+  const translatedName = await translateText(workoutName);
+  const translatedDescription = await translateText(description);
+
+  const textToCheck = `${translatedName || ""}. ${
+    translatedDescription || ""
+  }`.trim();
+
+  if (!textToCheck) {
+    return res
+      .status(400)
+      .json({ message: "Workout name or description is required." });
   }
 
   try {
     const languageToolRes = await axios.post(
-      'https://api.languagetoolplus.com/v2/check',
-      `text=${encodeURIComponent(description)}&language=en-US`,
+      "https://api.languagetoolplus.com/v2/check",
+      `text=${encodeURIComponent(textToCheck)}&language=en-US`,
       {
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        }
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
       }
     );
 
     res.json(languageToolRes.data.matches);
   } catch (err) {
-    console.error('LanguageTool API Error:', err.response?.data || err.message);
-    res.status(500).json({ error: 'Failed to check for typos.' });
+    console.error("LanguageTool API Error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to check for typos." });
   }
 });
 
