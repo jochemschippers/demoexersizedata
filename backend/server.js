@@ -1,62 +1,27 @@
+require('dotenv').config();
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
-const bodyParser = require('body-parser');
-const dotenv = require('dotenv');
-const { pipeline } = require('@xenova/transformers');
-const Workout = require('./Workout');
-
-dotenv.config();
-
+const mongoose = require('mongoose');
+const axios = require('axios');
+const { getEmbedding } = require('./embeddingService');
+const Workout = require('./models/Workout');
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-// --- MongoDB connection ---
-mongoose
-  .connect(
-    'mongodb+srv://Jochem:AHcHbj2$@new-workout-demo.6lbaoup.mongodb.net/',
-    {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    }
-  )
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch((err) => console.error(err));
+const MONGO_URI = process.env.MONGO_URI;
 
-// --- Helper: Generate Embedding (Node.js native) ---
-let extractor;
-async function getExtractor() {
-  if (!extractor) {
-    extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-  }
-  return extractor;
-}
+mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
-async function getEmbedding(text) {
-  try {
-    const extractor = await getExtractor();
-    const result = await extractor(text, {
-      pooling: 'mean',
-      normalize: true,
-    });
-    return Array.from(result.data);
-  } catch (error) {
-    console.error('Embedding generation failed:', error);
-    throw new Error('Failed to generate embedding.');
-  }
-}
-
-// --- Route: Add a workout (stores embedding) ---
+// --- Route: Add a workout ---
 app.post('/workouts/add', async (req, res) => {
   try {
     const { workoutName, description, category, intensity } = req.body;
-    const inputText = `${workoutName}. ${description}`;
-
-    // Generate the embedding from the input text
+    const inputText = `${workoutName}. ${description}. Category: ${category}. Intensity: ${intensity}.`;
     const embedding = await getEmbedding(inputText);
 
-    // Create a new workout document with all the fields and the embedding
     const workout = new Workout({
       workoutName,
       description,
@@ -78,11 +43,8 @@ app.post('/workouts/check', async (req, res) => {
   try {
     const { workoutName, description, category, intensity } = req.body;
     const inputText = `${workoutName}. ${description}. Category: ${category}. Intensity: ${intensity}.`;
-
-    // 1. Create embedding for new workout
     const newEmbedding = await getEmbedding(inputText);
 
-    // 2. Search for nearest matches in MongoDB
     const results = await Workout.aggregate([
       {
         $vectorSearch: {
@@ -100,21 +62,16 @@ app.post('/workouts/check', async (req, res) => {
           description: 1,
           category: 1,
           intensity: 1,
-          _score: { $meta: 'vectorSearchScore' }, // <-- This line gets the score
+          _score: { $meta: 'vectorSearchScore' },
         },
       },
     ]);
 
-    // Check if a match was found and log the score
     if (results.length > 0) {
       const bestMatch = results[0];
       const similarityScore = bestMatch._score;
 
-      // Log the score for debugging
-      console.log(`Found a match with similarity score: ${similarityScore}`);
-
       if (similarityScore > 0.85) {
-        // Check against the threshold
         return res.json({
           isDuplicate: true,
           message: '⚠️ Possible duplicate workout found!',
@@ -129,7 +86,7 @@ app.post('/workouts/check', async (req, res) => {
       }
     }
 
-    return res.json({
+    res.json({
       isDuplicate: false,
       message: '✅ No duplicate found.',
     });
@@ -138,14 +95,31 @@ app.post('/workouts/check', async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
-// --- Route: Get all workouts ---
-app.get('/workouts', async (req, res) => {
+
+// --- Route: Check for typos and grammar ---
+app.post('/workouts/lint', async (req, res) => {
+  const { description } = req.body;
+  if (!description) {
+    return res.status(400).json({ message: 'Description is required.' });
+  }
+
   try {
-    const workouts = await Workout.find().select('-embedding'); // exclude large vectors
-    res.json(workouts);
+    const languageToolRes = await axios.post(
+      'https://api.languagetoolplus.com/v2/check',
+      `text=${encodeURIComponent(description)}&language=en-US`,
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
+    );
+
+    res.json(languageToolRes.data.matches);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error('LanguageTool API Error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to check for typos.' });
   }
 });
 
-app.listen(5000, () => console.log('🚀 Server running on port 5000'));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
