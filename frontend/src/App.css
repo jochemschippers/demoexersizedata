@@ -164,3 +164,31 @@ button:last-child:hover {
   color: #6c757d;
   font-size: 0.9rem;
 }
+
+/* Muscle group container */
+.muscle-group-container {
+  display: flex;
+  flex-wrap: wrap;      /* Wrap to next line if it exceeds width */
+  gap: 15px;            /* Space between checkboxes */
+  margin-top: 5px;
+}
+
+/* Individual checkbox label */
+.muscle-group-container label {
+  display: flex;
+  align-items: center;
+  background-color: #f3f3f3;
+  padding: 5px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background-color 0.2s ease;
+}
+
+.muscle-group-container label:hover {
+  background-color: #e0e0e0;
+}
+
+.muscle-group-container input[type="checkbox"] {
+  margin-right: 5px;
+}
